@@ -1,63 +1,113 @@
+import os
+import json
+import requests
 import yfinance as yf
 import pandas as pd
 import ta
-import requests
-import functions_framework
+from google.cloud import firestore
+from nacl.signing import VerifyKey
+from nacl.exceptions import BadSignatureError
 
 # CONFIGURATION
-# Your Discord Webhook (I kept yours here)
-DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1467866367754633285/1YUrvsrr2r56IzemVYxqC0NFobpGgwW0oFoYlgZcdQnK3IezetxrxlspKkWAavBHen0W"
+# 1. Paste your DISCORD PUBLIC KEY here (from the Developer Portal)
+DISCORD_PUBLIC_KEY = "93e020388fb344711e2fc871a7fe4fadd804dcb7c4cdf925aec20ebbfd294afa"
 
-# Stocks to Watch
-SYMBOLS = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
+# 2. Setup Database
+db = firestore.Client()
+COLLECTION_NAME = "watchlist"
 
-def get_analysis(symbol):
-    try:
-        # Fetch data from Yahoo Finance (No Key Needed)
-        ticker = yf.Ticker(symbol)
-        
-        # 1. Get Financials (Using ROE as a proxy for ROIC)
-        info = ticker.info
-        roe = info.get('returnOnEquity', 0)
-        
-        # 2. Get Price Data (Last 6 months)
-        history = ticker.history(period="6mo")
-        if history.empty: return None
-        
-        # Indicators
-        macd = ta.trend.MACD(history['Close'])
-        
-        # Check Signals
-        signals = []
-        
-        # MACD Bullish Crossover
-        if macd.macd().iloc[-1] > macd.macd_signal().iloc[-1] and macd.macd().iloc[-2] < macd.macd_signal().iloc[-2]:
-            signals.append("MACD Buy Signal")
-            
-        return {'price': history['Close'].iloc[-1], 'roe': roe, 'signals': signals}
-    except Exception as e:
-        print(f"Error analyzing {symbol}: {e}")
-        return None
+# 3. Setup Verification (Security)
+verify_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
 
-def send_discord(symbol, data):
-    # Filter: Only alert if ROE is decent (> 10%)
-    if data['roe'] < 0.10: return
+def get_watchlist():
+    """Reads the stock list from Firestore"""
+    docs = db.collection(COLLECTION_NAME).stream()
+    return [doc.id for doc in docs]
+
+def add_stock(symbol):
+    """Adds a stock to Firestore"""
+    db.collection(COLLECTION_NAME).document(symbol.upper()).set({'added': True})
+    return f"✅ Added {symbol.upper()} to watchlist."
+
+def remove_stock(symbol):
+    """Removes a stock from Firestore"""
+    db.collection(COLLECTION_NAME).document(symbol.upper()).delete()
+    return f"🗑️ Removed {symbol.upper()}."
+
+def run_analysis():
+    """Runs the scan on the Firestore list"""
+    symbols = get_watchlist()
+    if not symbols: return "Watchlist is empty! Use /add to add stocks."
     
-    color = 5763719 if data['signals'] else 9807270
-    desc = f"**Price:** ${data['price']:.2f}\n**ROE:** {data['roe']*100:.1f}%\n"
-    if data['signals']: desc += "\n**🔔 SIGNALS:**\n" + "\n".join(data['signals'])
-    
-    requests.post(DISCORD_WEBHOOK, json={"embeds": [{"title": f"Update: {symbol}", "description": desc, "color": color}]})
-
-@functions_framework.http
-def run_scanner(request):
     report = []
-    for s in SYMBOLS:
-        data = get_analysis(s)
-        if data: 
-            send_discord(s, data)
-            report.append(f"{s}: OK (${data['price']:.2f})")
-        else:
-            report.append(f"{s}: Failed")
+    for s in symbols:
+        try:
+            ticker = yf.Ticker(s)
+            hist = ticker.history(period="6mo")
+            if hist.empty: continue
             
-    return "\n".join(report)
+            # Simple Logic: Price > 50-day SMA
+            sma = ta.trend.SMAIndicator(hist['Close'], window=50).sma_indicator()
+            price = hist['Close'].iloc[-1]
+            
+            if price > sma.iloc[-1]:
+                report.append(f"**{s}**: ${price:.2f} (Bullish)")
+        except:
+            continue
+            
+    return "\n".join(report) if report else "No bullish signals found."
+
+def verify_signature(request):
+    """Verifies that the request came from Discord"""
+    signature = request.headers.get("X-Signature-Ed25519")
+    timestamp = request.headers.get("X-Signature-Timestamp")
+    body = request.data.decode("utf-8")
+    
+    try:
+        verify_key.verify(f'{timestamp}{body}'.encode(), bytes.fromhex(signature))
+    except BadSignatureError:
+        return False
+    return True
+
+def run_scanner(request):
+    # 1. Security Check (Discord requires this)
+    if not verify_signature(request):
+        return ("invalid request signature", 401)
+    
+    req = request.get_json()
+    
+    # 2. Handle "PING" (Discord checks if bot is alive)
+    if req.get("type") == 1:
+        return ({"type": 1}, 200)
+    
+    # 3. Handle Commands
+    if req.get("type") == 2:
+        command = req['data']['name']
+        options = req['data'].get('options', [])
+        
+        # /add [symbol]
+        if command == "add":
+            symbol = options[0]['value']
+            msg = add_stock(symbol)
+            return ({"type": 4, "data": {"content": msg}}, 200)
+            
+        # /remove [symbol]
+        elif command == "remove":
+            symbol = options[0]['value']
+            msg = remove_stock(symbol)
+            return ({"type": 4, "data": {"content": msg}}, 200)
+            
+        # /list
+        elif command == "list":
+            stocks = get_watchlist()
+            msg = f"👀 Watchlist: {', '.join(stocks)}" if stocks else "Watchlist is empty."
+            return ({"type": 4, "data": {"content": msg}}, 200)
+            
+        # /scan
+        elif command == "scan":
+            # Respond immediately (scanning takes time)
+            # Note: For long scans, we need deferred responses, but let's keep it simple first.
+            report = run_analysis()
+            return ({"type": 4, "data": {"content": f"🔎 **Scan Results:**\n{report}"}}, 200)
+
+    return ({"error": "unknown command"}, 400)
