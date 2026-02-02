@@ -1,7 +1,7 @@
-pandas
-requests
-ta
-yfinance
-functions_framework
+functions-framework
 google-cloud-firestore
 pynacl
+requests
+pandas
+yfinance
+ta
