@@ -1,18 +1,22 @@
 import functions_framework
+import os
+import json
 from nacl.signing import VerifyKey
 from nacl.exceptions import BadSignatureError
-import json
 
-# CONFIGURATION
-# PASTE YOUR PUBLIC KEY FROM DISCORD DEVELOPER PORTAL HERE:
-DISCORD_PUBLIC_KEY = "93e020388fb344711e2fc871a7fe4fadd804dcb7c4cdf925aec20ebbfd294afa"
+# 1. LOAD SECRETS (From Google Cloud Variables)
+# If these are missing, the bot will print an error in the logs
+PUBLIC_KEY = os.environ.get('DISCORD_PUBLIC_KEY')
+
+if not PUBLIC_KEY:
+    raise ValueError("Missing DISCORD_PUBLIC_KEY environment variable")
 
 # Initialize Security Tool
-verify_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
+verify_key = VerifyKey(bytes.fromhex(PUBLIC_KEY))
 
 @functions_framework.http
 def run_scanner(request):
-    # 1. Verify the Request is from Discord (Security Check)
+    # 2. SECURITY CHECK (The Doorman)
     signature = request.headers.get('X-Signature-Ed25519')
     timestamp = request.headers.get('X-Signature-Timestamp')
     body = request.data.decode('utf-8')
@@ -25,11 +29,34 @@ def run_scanner(request):
     except BadSignatureError:
         return 'Invalid signature', 401
 
-    # 2. Handle the "Handshake" (PING)
+    # 3. INTERACTION HANDLER
     req = request.get_json()
+
+    # TYPE 1: PING (The Handshake)
     if req['type'] == 1:
         return {'type': 1}
 
-    # 3. Handle Commands (e.g., /add NVDA)
-    # We will build this out fully next, but this keeps the bot alive.
-    return {'type': 4, 'data': {'content': "✅ Command received! (Logic coming soon)"}}
+    # TYPE 2: COMMANDS (Slash Commands)
+    if req['type'] == 2:
+        command_name = req['data']['name']
+        
+        # HANDLE "/scan"
+        if command_name == "scan":
+            return {
+                'type': 4,
+                'data': {
+                    'content': "🚀 **Scanning Market...** (This is a placeholder response using GitHub!)"
+                }
+            }
+
+        # HANDLE "/add"
+        if command_name == "add":
+            stock = req['data']['options'][0]['value']
+            return {
+                'type': 4,
+                'data': {
+                    'content': f"✅ Added **{stock.upper()}** to the watchlist."
+                }
+            }
+
+    return {'error': 'Unknown request'}
