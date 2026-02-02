@@ -3,3 +3,5 @@ requests
 ta
 yfinance
 functions_framework
+google-cloud-firestore
+pynacl
