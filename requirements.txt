@@ -1,3 +1,5 @@
 pandas
 requests
 ta
+yfinance
+functions_framework
